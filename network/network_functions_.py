@@ -179,7 +179,6 @@ class generator_upsample(nn.Module):
         self.padding = padding
         self.upsample_body_factor = upsample_body_factor
         self.hidden_channels_head = hidden_channels[0]
-        self.latent_size = latent_dim
         self.label_conditioning = self.label_conditioning_layer( 
                                 conditioning_dim_out,
                                 conditioning_dim_in,
@@ -197,7 +196,6 @@ class generator_upsample(nn.Module):
                                                                       out_channel_generator)
         self.to(self.device)
     
-    
     def label_conditioning_layer(self, 
                                 conditioning_dim_out,
                                 conditioning_dim_in,
@@ -210,24 +208,23 @@ class generator_upsample(nn.Module):
                                     conditioning_dim_out))
         return nn.Sequential(*label_layer)
     
-    def latent_linear_layer(self.
+    def latent_linear_layer(self,
                            latent_dim_in,
                            latent_dim_out):
         latent_layer = [nn.Linear(latent_dim_in,
                                  latent_dim_out)]
         latent_layer.append(nn.LeakyReLU(0.2))
-        
-    
+        return nn.Sequential(*latent_layer)
         
     def head(self):
-        head_layers = [nn.Conv2d(in_channels = 1,
+        head_layers = [nn.Conv2d(in_channels = 1024,
                                  out_channels = self.hidden_channels_head,
                                  kernel_size = self.kernel_size_head,
                                  stride = self.stride_head,
                                  bias = False
                                 )
                       ]
-        head_layers.append(nn.LazyBatchNorm2d())
+        head_layers.append(nn.BatchNorm2d(self.hidden_channels_head))
         head_layers.append(nn.LeakyReLU(0.2, inplace=True))
         return nn.Sequential(*head_layers)
     
@@ -236,7 +233,7 @@ class generator_upsample(nn.Module):
             out_channels,
             dropout = True,
             dropout_rate = 0.05,
-            kernel_body_size = 4,
+            kernel_body_size = 2,
             stride_body_size = 1,
             padding_body = 1,
             bn=True):
@@ -275,16 +272,30 @@ class generator_upsample(nn.Module):
     def forward(self, latent_vector, label_vector):
         label_vector = label_vector.type(torch.LongTensor).to(self.device)
         latent_vector = latent_vector.float().to(self.device)
+        batch_size = latent_vector.shape[0]
         print('label: ', label_vector.shape)
         print('latent: ',latent_vector.shape)
         label_vector = self.label_conditioning(label_vector)
         latent_vector = self.latent_conditioning(latent_vector)
         print('label: ', label_vector.shape)
         print('latent: ',latent_vector.shape)
-        
+        #reshape
+        label_vector = label_vector[:,:,-1,:]
+        label_vector = label_vector.view(batch_size,
+                                        1,
+                                        4,
+                                        4)
+        print('label: ', label_vector.shape)
+        latent_vector = latent_vector.view(batch_size,
+                                          1023,
+                                          4,
+                                          4)
+        print('latent: ',latent_vector.shape)
         concatenated_input = torch.cat((label_vector, latent_vector), 1)
         print(concatenated_input.shape)
         concatenated_input = self.main_head(concatenated_input)
+        print(concatenated_input.shape)
         concatenated_input = self.upsample_body(concatenated_input)
+        print(concatenated_input.shape)
         concatenated_input = self.generated_img_Layer(concatenated_input)
         return concatenated_input
