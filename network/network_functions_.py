@@ -36,12 +36,12 @@ class Gaussian_noise(nn.Module):
         
         
     def decay_step(self):
-        self.current_epoch+=1
+        if self.current_epoch < self.total_epochs:
+            self.current_epoch+=1
         decay_std_dev = self.total_epochs * self.decay_ratio
         current_std_dev = 1.0 - self.current_epoch/decay_std_dev
         current_std_dev *= self.initial_std_dev - self.min_std_dev
         current_std_dev+=self.min_std_dev
-        print(current_std_dev, self.min_std_dev, )
         self.current_std_dev = np.clip(current_std_dev,
                                          self.min_std_dev,
                                          self.initial_std_dev)
@@ -56,6 +56,9 @@ class Gaussian_noise(nn.Module):
 class discriminator_conv(nn.Module):
     def __init__(self,
                  total_epochs,
+                 label_conditioning_linear_size,
+                 label_vector_size,
+                 embedding_vector_size,
                  hidden_channels = (512, 256, 128, 64, 32),
                  final_linear = 1,
                  stride = 2,
@@ -64,16 +67,30 @@ class discriminator_conv(nn.Module):
                 ):
         super(discriminator_conv, self).__init__()
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.label_conditioning_linear_size = label_conditioning_linear_size
         self.kernel_size = kernel_size
         self.bias = bias
         self.stride = stride
         self.padding = 1
         self.total_epochs = total_epochs
+        self.leaf = self.label_embedding_layer(label_vector_size,
+                                              embedding_vector_size)
         self.tree = nn.Sequential(*[
             self.discriminator_body(hidden_channels[i], hidden_channels[i + 1]) for i in range(len(hidden_channels) - 1)])
-        self.root_score = self.root(331776)
+        self.root_score = self.root(495616)
         self.to(self.device)
-        
+    
+    #bchw - b,3,1,w
+    def label_embedding_layer(self, 
+                        label_vector_size,
+                        embedding_dim_size
+                       ):
+        label_conditioning_layer = [nn.Embedding(label_vector_size,
+                                             embedding_dim_size)]
+        label_conditioning_layer.append(nn.Linear(embedding_dim_size,
+                                              self.label_conditioning_linear_size))
+        return nn.Sequential(*label_conditioning_layer)
+    
 
     def discriminator_body(self, 
                           in_channels,
@@ -104,18 +121,37 @@ class discriminator_conv(nn.Module):
         discriminator_root_layer.append(nn.Linear(flattened_tensor, 1).to(self.device))
         return nn.Sequential(*discriminator_root_layer)
     
-    def forward(self, input_):
-        if not isinstance(input_, torch.Tensor):
-            input_ = torch.tensor(input_, dtype=torch.float32).to(self.device)
-        input_ = self.tree(input_)
-        batch_size = input_.shape[0]
-        accumilated_flattening_size = input_.shape[1]*input_.shape[2]*input_.shape[3]
-        input_ = torch.flatten(input_)
-        input_ = input_.view(batch_size, accumilated_flattening_size)
-        #print(input_.shape)
-        input_ = self.root_score(input_)
-        return input_
-
+    def forward(self, image_, conditioning_label):
+        if not isinstance(image_, torch.Tensor):
+            image_ = torch.tensor(image_, dtype=torch.float32).to(self.device)
+        if not isinstance(conditioning_label, torch.Tensor):
+            conditioning_label = torch.tensor(conditioning_label, dtype=torch.long).to(self.device)
+        batch_size = image_.shape[0]
+        #print('batch: ', batch_size)
+        conditioning_label = conditioning_label.type(torch.LongTensor).to(self.device)
+        #print('label shape: ', conditioning_label.shape)
+        conditioning_label = self.leaf(conditioning_label)
+        #BCHWCn
+        #print(conditioning_label.shape)
+        conditioning_label = conditioning_label[:,:,-1,:]#we only want embeddinglayer data
+        #print(conditioning_label.shape)
+        conditioning_label = conditioning_label.view(batch_size,
+                                                    3,
+                                                    126,
+                                                    126)
+        #print(conditioning_label.shape)
+        #concatenate
+        #print('image shape: ', image_.shape)
+        #print('label shape: ', conditioning_label.shape)
+        image_ = torch.cat((image_, conditioning_label),1)
+        #print('concatenated shape: ', image_.shape)
+        image_ = self.tree(image_)
+        accumilated_flattening_size = image_.shape[1]*image_.shape[2]*image_.shape[3]
+        image_ = torch.flatten(image_)
+        image_ = image_.view(batch_size, accumilated_flattening_size)
+        #print(image_.shape)
+        image_ = self.root_score(image_)
+        return image_
     
     
     
@@ -126,7 +162,12 @@ class discriminator_conv(nn.Module):
 
 class generator_upsample(nn.Module):
     def __init__(self,
-                latent_dim,
+                latent_dim_in,
+                latent_dim_out,
+                conditioning_dim_out_e,
+                conditioning_dim_out,
+                conditioning_dim_in_e,
+                conditioning_dim_in, 
                 hidden_channels=(512, 256, 128, 64, 32),
                 kernel_size_head = 2,
                 stride_head = 1,
@@ -142,7 +183,14 @@ class generator_upsample(nn.Module):
         self.padding = padding
         self.upsample_body_factor = upsample_body_factor
         self.hidden_channels_head = hidden_channels[0]
-        self.latent_size = latent_dim
+        self.label_conditioning = self.label_conditioning_layer( 
+                                conditioning_dim_out,
+                                conditioning_dim_in,
+                                conditioning_dim_in_e,
+                                conditioning_dim_out_e)
+        self.latent_conditioning = self.latent_linear_layer(
+                                            latent_dim_in,
+                                            latent_dim_out)
         self.main_head = self.head()
         self.upsample_body = (nn.Sequential(*
                                   [self.body(hidden_channels[i],
@@ -151,17 +199,38 @@ class generator_upsample(nn.Module):
         self.generated_img_Layer = self.generate_layer(hidden_channels[-1], 
                                                                       out_channel_generator)
         self.to(self.device)
+    
+    def label_conditioning_layer(self, 
+                                conditioning_dim_out,
+                                conditioning_dim_in,
+                                conditioning_dim_in_e,
+                                conditioning_dim_out_e
+                                ):
+        label_layer = [nn.Embedding(conditioning_dim_in_e,
+                                   conditioning_dim_out_e)]
         
+        label_layer.append(nn.Linear(conditioning_dim_in,
+                                    conditioning_dim_out))
+        
+        return nn.Sequential(*label_layer)
+    
+    def latent_linear_layer(self,
+                           latent_dim_in,
+                           latent_dim_out):
+        latent_layer = [nn.Linear(latent_dim_in,
+                                 latent_dim_out)]
+        latent_layer.append(nn.LeakyReLU(0.2))
+        return nn.Sequential(*latent_layer)
         
     def head(self):
-        head_layers = [nn.Conv2d(in_channels = 1,
+        head_layers = [nn.Conv2d(in_channels = 1024,
                                  out_channels = self.hidden_channels_head,
                                  kernel_size = self.kernel_size_head,
                                  stride = self.stride_head,
                                  bias = False
                                 )
                       ]
-        head_layers.append(nn.LazyBatchNorm2d())
+        head_layers.append(nn.BatchNorm2d(self.hidden_channels_head))
         head_layers.append(nn.LeakyReLU(0.2, inplace=True))
         return nn.Sequential(*head_layers)
     
@@ -170,7 +239,7 @@ class generator_upsample(nn.Module):
             out_channels,
             dropout = True,
             dropout_rate = 0.05,
-            kernel_body_size = 4,
+            kernel_body_size = 2,
             stride_body_size = 1,
             padding_body = 1,
             bn=True):
@@ -206,11 +275,41 @@ class generator_upsample(nn.Module):
         generator_layer.append(nn.Tanh())
         return nn.Sequential(*generator_layer)
     
-    def forward(self, x):
-        if not isinstance(x, torch.Tensor):
-            x = torch.tensor(x, dtype=torch.float32).to(self.device)
-        #print(x.shape)
-        x_head = self.main_head(x)
-        x_head = self.upsample_body(x_head)
-        x_head = self.generated_img_Layer(x_head)
-        return x_head
+    def forward(self, latent_vector, label_vector):
+        if not isinstance(latent_vector, torch.Tensor):
+            latent_vector = torch.tensor(latent_vector, dtype=torch.float32).to(self.device)
+        if not isinstance(label_vector, torch.Tensor):
+            label_vector = torch.tensor(label_vector, dtype=torch.long).to(self.device)
+        latent_vector = latent_vector.float().to(self.device)
+        label_vector = label_vector.type(torch.LongTensor).to(self.device)
+        batch_size = latent_vector.shape[0]
+        #print('label: ', label_vector.shape)
+        #print('latent: ',latent_vector.shape)
+        latent_vector = self.latent_conditioning(latent_vector)
+        #print('label: ', label_vector.shape)
+        label_vector = self.label_conditioning(label_vector)
+        
+        #print('label: ', label_vector.shape)
+        #print('latent: ',latent_vector.shape)
+        #reshape
+        #print(label_vector.shape)
+        label_vector = label_vector[:,:,-1,:]
+        #print(label_vector.shape)
+        label_vector = label_vector.view(batch_size,
+                                        1,
+                                        4,
+                                        4)
+        #print('label: ', label_vector.shape)
+        latent_vector = latent_vector.view(batch_size,
+                                          1023,
+                                          4,
+                                          4)
+        #print('latent: ',latent_vector.shape)
+        concatenated_input = torch.cat((label_vector, latent_vector), 1)
+        #print(concatenated_input.shape)
+        concatenated_input = self.main_head(concatenated_input)
+        #print(concatenated_input.shape)
+        concatenated_input = self.upsample_body(concatenated_input)
+        #print(concatenated_input.shape)
+        concatenated_input = self.generated_img_Layer(concatenated_input)
+        return concatenated_input
