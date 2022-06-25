@@ -69,8 +69,11 @@ class ThumbnailDataloader(Dataset):
 #no need for labels cause images from thumbnail will always be 1, randomized generated images will always be 0
 
 class NumpyDataloader(Dataset):
-    def __init__(self, dataframe, transform=None, resize=(126, 126)):
+    def __init__(self, dataframe,
+                 dataframe_labels,
+                 transform=None, resize=(126, 126)):
         self.annotations = dataframe
+        self.annotations_label = dataframe_labels
         self.transform = transform
         self.resize = resize
         
@@ -80,19 +83,19 @@ class NumpyDataloader(Dataset):
     def __getitem__(self, idx):
         #print(idx)
         thumbnail_npy = np.load(self.annotations.iloc[idx].values[0])
+        label_npy = np.load(self.annotations_label.iloc[idx].values[0])
         if self.transform:
             thumbnail_npy = self.transform(thumbnail_npy)
-        return thumbnail_npy
+            label_npy = self.transform(label_npy)
+        return thumbnail_npy, label_npy
 # In[4]:
 
 
 def load_filenames_array(root_dir, extension):
     thumbnail_img_path_array = []#to be saved to a dataframe for dataloading
     for idx_folder in os.listdir(root_dir):#open root folder(thumbnails)
-        if 'LICENSE' not in idx_folder:#all idx folder except license text
-            for idx_thumbnail in os.listdir(os.path.join(root_dir, idx_folder)):
-                if idx_thumbnail.endswith(extension):
-                    thumbnail_img_path_array.append(os.path.join(root_dir, idx_folder, idx_thumbnail))
+        if idx_folder.endswith(extension):
+            thumbnail_img_path_array.append(os.path.join(root_dir, idx_folder))
     return thumbnail_img_path_array
 
 
